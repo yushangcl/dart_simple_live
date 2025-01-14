@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:floating/floating.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:lottie/lottie.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:remixicon/remixicon.dart';
 import 'package:simple_live_app/app/app_style.dart';
@@ -12,6 +13,8 @@ import 'package:simple_live_app/app/sites.dart';
 import 'package:simple_live_app/app/utils.dart';
 import 'package:simple_live_app/modules/live_room/live_room_controller.dart';
 import 'package:simple_live_app/modules/live_room/player/player_controls.dart';
+import 'package:simple_live_app/services/follow_service.dart';
+import 'package:simple_live_app/widgets/desktop_refresh_button.dart';
 import 'package:simple_live_app/widgets/follow_user_item.dart';
 import 'package:simple_live_app/widgets/keep_alive_wrapper.dart';
 import 'package:simple_live_app/widgets/net_image.dart';
@@ -29,6 +32,60 @@ class LiveRoomPage extends GetView<LiveRoomController> {
   Widget build(BuildContext context) {
     final page = Obx(
       () {
+        if (controller.loadError.value) {
+          return Scaffold(
+            appBar: AppBar(
+              title: const Text("直播间加载失败"),
+            ),
+            body: Padding(
+              padding: AppStyle.edgeInsetsA12,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  LottieBuilder.asset(
+                    'assets/lotties/error.json',
+                    height: 140,
+                    repeat: false,
+                  ),
+                  const Text(
+                    "直播间加载失败",
+                    textAlign: TextAlign.center,
+                  ),
+                  AppStyle.vGap4,
+                  Text(
+                    controller.error?.toString() ?? "未知错误",
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  AppStyle.vGap4,
+                  Text(
+                    "${controller.rxSite.value.id} - ${controller.rxRoomId.value}",
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      TextButton.icon(
+                        onPressed: controller.copyErrorDetail,
+                        icon: const Icon(Remix.file_copy_line),
+                        label: const Text("复制信息"),
+                      ),
+                      TextButton.icon(
+                        onPressed: controller.refreshRoom,
+                        icon: const Icon(Remix.refresh_line),
+                        label: const Text("刷新"),
+                      ),
+                    ],
+                  )
+                ],
+              ),
+            ),
+          );
+        }
         if (controller.fullScreenState.value) {
           return PopScope(
             canPop: false,
@@ -157,6 +214,14 @@ class LiveRoomPage extends GetView<LiveRoomController> {
                 icon: const Icon(Remix.share_line),
                 label: const Text("分享"),
               ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  textStyle: const TextStyle(fontSize: 14),
+                ),
+                onPressed: controller.copyUrl,
+                icon: const Icon(Remix.file_copy_line),
+                label: const Text("复制链接"),
+              ),
             ],
           ),
         ),
@@ -195,6 +260,8 @@ class LiveRoomPage extends GetView<LiveRoomController> {
           },
           aspectRatio: aspectRatio,
           fit: boxFit,
+          // 自己实现
+          wakelock: false,
         ),
         Obx(
           () => Visibility(
@@ -643,27 +710,42 @@ class LiveRoomPage extends GetView<LiveRoomController> {
 
   Widget buildFollowList() {
     return Obx(
-      () => RefreshIndicator(
-        onRefresh: controller.followController.refreshData,
-        child: ListView.builder(
-          itemCount: controller.followController.allList.length,
-          itemBuilder: (_, i) {
-            var item = controller.followController.allList[i];
-            return Obx(
-              () => FollowUserItem(
-                item: item,
-                playing: controller.rxSite.value.id == item.siteId &&
-                    controller.rxRoomId.value == item.roomId,
-                onTap: () {
-                  controller.resetRoom(
-                    Sites.allSites[item.siteId]!,
-                    item.roomId,
-                  );
-                },
+      () => Stack(
+        children: [
+          RefreshIndicator(
+            onRefresh: FollowService.instance.loadData,
+            child: ListView.builder(
+              itemCount: FollowService.instance.liveList.length,
+              itemBuilder: (_, i) {
+                var item = FollowService.instance.liveList[i];
+                return Obx(
+                  () => FollowUserItem(
+                    item: item,
+                    playing: controller.rxSite.value.id == item.siteId &&
+                        controller.rxRoomId.value == item.roomId,
+                    onTap: () {
+                      controller.resetRoom(
+                        Sites.allSites[item.siteId]!,
+                        item.roomId,
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+          if (Platform.isLinux || Platform.isWindows || Platform.isMacOS)
+            Positioned(
+              right: 12,
+              bottom: 12,
+              child: Obx(
+                () => DesktopRefreshButton(
+                  refreshing: FollowService.instance.updating.value,
+                  onPressed: FollowService.instance.loadData,
+                ),
               ),
-            );
-          },
-        ),
+            ),
+        ],
       ),
     );
   }
@@ -759,11 +841,20 @@ class LiveRoomPage extends GetView<LiveRoomController> {
             ),
             ListTile(
               leading: const Icon(Icons.share_sharp),
-              title: const Text("分享链接"),
+              title: const Text("分享直播间"),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
                 Get.back();
                 controller.share();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text("复制链接"),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () {
+                Get.back();
+                controller.copyUrl();
               },
             ),
             ListTile(
@@ -773,6 +864,15 @@ class LiveRoomPage extends GetView<LiveRoomController> {
               onTap: () {
                 Get.back();
                 controller.openNaviteAPP();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.info_outline_rounded),
+              title: const Text("播放信息"),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () {
+                Get.back();
+                controller.showDebugInfo();
               },
             ),
           ],

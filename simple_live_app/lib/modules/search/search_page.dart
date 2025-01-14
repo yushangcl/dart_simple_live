@@ -88,13 +88,18 @@ class SearchPage extends GetView<AppSearchController> {
         ),
       ),
       body: TabBarView(
+        physics: const NeverScrollableScrollPhysics(),
         controller: controller.tabController,
         children: Sites.supportSites
-            .map(
-              (e) => SearchListView(
-                e.id,
-              ),
-            )
+            .map((e) => SearchListView(
+                      e.id,
+                    )
+                // (e) => e.id == Constant.kDouyin
+                //     ? const DouyinSearchView()
+                //     : SearchListView(
+                //         e.id,
+                //       ),
+                )
             .toList(),
       ),
     );

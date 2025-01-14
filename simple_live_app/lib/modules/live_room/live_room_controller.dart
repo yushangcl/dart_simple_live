@@ -19,9 +19,10 @@ import 'package:simple_live_app/app/utils.dart';
 import 'package:simple_live_app/models/db/follow_user.dart';
 import 'package:simple_live_app/models/db/history.dart';
 import 'package:simple_live_app/modules/live_room/player/player_controller.dart';
-import 'package:simple_live_app/modules/user/danmu_settings_page.dart';
-import 'package:simple_live_app/modules/user/follow_user/follow_user_controller.dart';
+import 'package:simple_live_app/modules/settings/danmu_settings_page.dart';
 import 'package:simple_live_app/services/db_service.dart';
+import 'package:simple_live_app/services/follow_service.dart';
+import 'package:simple_live_app/widgets/desktop_refresh_button.dart';
 import 'package:simple_live_app/widgets/follow_user_item.dart';
 import 'package:simple_live_core/simple_live_core.dart';
 import 'package:url_launcher/url_launcher_string.dart';
@@ -48,8 +49,6 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   Site get site => rxSite.value;
   late Rx<String> rxRoomId;
   String get roomId => rxRoomId.value;
-
-  FollowUserController followController = Get.put(FollowUserController());
 
   Rx<LiveRoomDetail?> detail = Rx<LiveRoomDetail?>(null);
   var online = 0.obs;
@@ -98,11 +97,15 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   /// 是否处于后台
   var isBackground = false;
 
+  /// 直播间加载失败
+  var loadError = false.obs;
+  Error? error;
+
   @override
   void onInit() {
     WidgetsBinding.instance.addObserver(this);
-    if (followController.allList.isEmpty) {
-      followController.refreshData();
+    if (FollowService.instance.followList.isEmpty) {
+      FollowService.instance.loadData();
     }
     initAutoExit();
     showDanmakuState.value = AppSettingsController.instance.danmuEnable.value;
@@ -128,6 +131,9 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
       autoExitMinutes.value =
           AppSettingsController.instance.autoExitDuration.value;
       setAutoExit();
+    } else {
+      autoExitMinutes.value =
+          AppSettingsController.instance.roomAutoExitDuration.value;
     }
   }
 
@@ -198,8 +204,20 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
 
       // 关键词屏蔽检查
       for (var keyword in AppSettingsController.instance.shieldList) {
-        if (msg.message.contains(keyword)) {
-          Log.d("关键词：$keyword\n消息内容：${msg.message}");
+        Pattern? pattern;
+        if (Utils.isRegexFormat(keyword)) {
+          String removedSlash = Utils.removeRegexFormat(keyword);
+          try {
+            pattern = RegExp(removedSlash);
+          } catch (e) {
+            // should avoid this during add keyword
+            Log.d("关键词：$keyword 正则格式错误");
+          }
+        } else {
+          pattern = keyword;
+        }
+        if (pattern != null && msg.message.contains(pattern)) {
+          Log.d("关键词：$keyword\n已屏蔽消息内容：${msg.message}");
           return;
         }
       }
@@ -257,9 +275,37 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   void loadData() async {
     try {
       SmartDialog.showLoading(msg: "");
-
+      loadError.value = false;
       addSysMsg("正在读取直播间信息");
       detail.value = await site.liveSite.getRoomDetail(roomId: roomId);
+
+      if (site.id == Constant.kDouyin) {
+        // 1.6.0之前收藏的WebRid
+        // 1.6.0收藏的RoomID
+        // 1.6.0之后改回WebRid
+        if (detail.value!.roomId != roomId) {
+          var oldId = roomId;
+          rxRoomId.value = detail.value!.roomId;
+          if (followed.value) {
+            // 更新关注列表
+            DBService.instance.deleteFollow("${site.id}_$oldId");
+            DBService.instance.addFollow(
+              FollowUser(
+                id: "${site.id}_$roomId",
+                roomId: roomId,
+                siteId: site.id,
+                userName: detail.value!.userName,
+                face: detail.value!.userAvatar,
+                addTime: DateTime.now(),
+              ),
+            );
+          } else {
+            followed.value =
+                DBService.instance.getFollowExist("${site.id}_$roomId");
+          }
+        }
+      }
+
       getSuperChatMessage();
 
       addHistory();
@@ -275,7 +321,10 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
       initDanmau();
       liveDanmaku.start(detail.value?.danmakuData);
     } catch (e) {
-      SmartDialog.showToast(e.toString());
+      Log.logPrint(e);
+      //SmartDialog.showToast(e.toString());
+      loadError.value = true;
+      error = e as Error;
     } finally {
       SmartDialog.dismiss(status: SmartStatus.loading);
     }
@@ -285,6 +334,7 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   void getPlayQualites() async {
     qualites.clear();
     currentQuality = -1;
+
     try {
       var playQualites =
           await site.liveSite.getPlayQualites(detail: detail.value!);
@@ -318,7 +368,7 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
     var qualityLevel = AppSettingsController.instance.qualityLevel.value;
     try {
       var connectivityResult = await (Connectivity().checkConnectivity());
-      if (connectivityResult == ConnectivityResult.mobile) {
+      if (connectivityResult.first == ConnectivityResult.mobile) {
         qualityLevel =
             AppSettingsController.instance.qualityLevelCellular.value;
       }
@@ -364,20 +414,31 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
         "user-agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36 Edg/115.0.1901.188"
       };
+    } else if (site.id == Constant.kHuya) {
+      headers = {
+        //"referer": "https://m.huya.com",
+        "user-agent": "HYSDK(Windows, 21000308)"
+      };
+    }
+
+    var playurl = playUrls[currentLineIndex];
+    if (AppSettingsController.instance.playerForceHttps.value) {
+      playurl = playurl.replaceAll("http://", "https://");
     }
 
     player.open(
       Media(
-        playUrls[currentLineIndex],
+        playurl,
         httpHeaders: headers,
       ),
     );
 
-    Log.d("播放链接\r\n：${playUrls[currentLineIndex]}");
+    Log.d("播放链接\r\n：$playurl");
   }
 
   @override
   void mediaEnd() async {
+    super.mediaEnd();
     if (mediaErrorRetryCount < 2) {
       Log.d("播放结束，尝试第${mediaErrorRetryCount + 1}次刷新");
       if (mediaErrorRetryCount == 1) {
@@ -404,6 +465,7 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   int mediaErrorRetryCount = 0;
   @override
   void mediaError(String error) async {
+    super.mediaEnd();
     if (mediaErrorRetryCount < 2) {
       Log.d("播放失败，尝试第${mediaErrorRetryCount + 1}次刷新");
       if (mediaErrorRetryCount == 1) {
@@ -510,6 +572,14 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
     Share.share(detail.value!.url);
   }
 
+  void copyUrl() {
+    if (detail.value == null) {
+      return;
+    }
+    Utils.copyToClipboard(detail.value!.url);
+    SmartDialog.showToast("已复制直播间链接");
+  }
+
   /// 底部打开播放器设置
   void showDanmuSettingsSheet() {
     Utils.showBottomSheet(
@@ -526,6 +596,38 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
           ),
         ],
       ),
+    );
+  }
+
+  void showVolumeSlider(BuildContext targetContext) {
+    SmartDialog.showAttach(
+      targetContext: targetContext,
+      alignment: Alignment.topCenter,
+      displayTime: const Duration(seconds: 3),
+      maskColor: const Color(0x00000000),
+      builder: (context) {
+        return Container(
+          decoration: BoxDecoration(
+            borderRadius: AppStyle.radius12,
+            color: Theme.of(context).cardColor,
+          ),
+          padding: AppStyle.edgeInsetsA4,
+          child: Obx(
+            () => SizedBox(
+              width: 200,
+              child: Slider(
+                min: 0,
+                max: 100,
+                value: AppSettingsController.instance.playerVolume.value,
+                onChanged: (newValue) {
+                  player.setVolume(newValue);
+                  AppSettingsController.instance.setPlayerVolume(newValue);
+                },
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -718,32 +820,46 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
   }
 
   void showFollowUserSheet() {
-    followController.setFilterMode(1);
     Utils.showBottomSheet(
       title: "关注列表",
       child: Obx(
-        () => RefreshIndicator(
-          onRefresh: followController.refreshData,
-          child: ListView.builder(
-            itemCount: followController.list.length,
-            itemBuilder: (_, i) {
-              var item = followController.list[i];
-              return Obx(
-                () => FollowUserItem(
-                  item: item,
-                  playing: rxSite.value.id == item.siteId &&
-                      rxRoomId.value == item.roomId,
-                  onTap: () {
-                    Get.back();
-                    resetRoom(
-                      Sites.allSites[item.siteId]!,
-                      item.roomId,
-                    );
-                  },
+        () => Stack(
+          children: [
+            RefreshIndicator(
+              onRefresh: FollowService.instance.loadData,
+              child: ListView.builder(
+                itemCount: FollowService.instance.liveList.length,
+                itemBuilder: (_, i) {
+                  var item = FollowService.instance.liveList[i];
+                  return Obx(
+                    () => FollowUserItem(
+                      item: item,
+                      playing: rxSite.value.id == item.siteId &&
+                          rxRoomId.value == item.roomId,
+                      onTap: () {
+                        Get.back();
+                        resetRoom(
+                          Sites.allSites[item.siteId]!,
+                          item.roomId,
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+            if (Platform.isLinux || Platform.isWindows || Platform.isMacOS)
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: Obx(
+                  () => DesktopRefreshButton(
+                    refreshing: FollowService.instance.updating.value,
+                    onPressed: FollowService.instance.loadData,
+                  ),
                 ),
-              );
-            },
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -805,6 +921,8 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
                 var duration =
                     Duration(hours: value.hour, minutes: value.minute);
                 autoExitMinutes.value = duration.inMinutes;
+                AppSettingsController.instance
+                    .setRoomAutoExitDuration(autoExitMinutes.value);
                 //setAutoExitDuration(duration.inMinutes);
                 setAutoExit();
               },
@@ -866,6 +984,16 @@ class LiveRoomController extends PlayerController with WidgetsBindingObserver {
 
     // 刷新信息
     loadData();
+  }
+
+  void copyErrorDetail() {
+    Utils.copyToClipboard('''直播平台：${rxSite.value.name}
+房间号：${rxRoomId.value}
+错误信息：
+${error?.toString()}
+----------------
+${error?.stackTrace}''');
+    SmartDialog.showToast("已复制错误信息");
   }
 
   @override

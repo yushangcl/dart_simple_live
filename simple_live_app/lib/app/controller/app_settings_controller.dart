@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:simple_live_app/app/constant.dart';
+import 'package:simple_live_app/app/log.dart';
 import 'package:simple_live_app/app/sites.dart';
 import 'package:simple_live_app/services/local_storage_service.dart';
 
@@ -38,6 +41,8 @@ class AppSettingsController extends GetxController {
         .getValue(LocalStorageService.kDanmuTopMargin, 0.0);
     danmuBottomMargin.value = LocalStorageService.instance
         .getValue(LocalStorageService.kDanmuBottomMargin, 0.0);
+    danmuFontWeight.value = LocalStorageService.instance.getValue(
+        LocalStorageService.kDanmuFontWeight, FontWeight.normal.index);
 
     hardwareDecode.value = LocalStorageService.instance
         .getValue(LocalStorageService.kHardwareDecode, true);
@@ -63,11 +68,17 @@ class AppSettingsController extends GetxController {
     autoExitDuration.value = LocalStorageService.instance
         .getValue(LocalStorageService.kAutoExitDuration, 60);
 
+    roomAutoExitDuration.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kRoomAutoExitDuration, 60);
+
     playerCompatMode.value = LocalStorageService.instance
         .getValue(LocalStorageService.kPlayerCompatMode, false);
 
     playerAutoPause.value = LocalStorageService.instance
         .getValue(LocalStorageService.kPlayerAutoPause, false);
+
+    playerForceHttps.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kPlayerForceHttps, false);
 
     autoFullScreen.value = LocalStorageService.instance
         .getValue(LocalStorageService.kAutoFullScreen, false);
@@ -80,6 +91,10 @@ class AppSettingsController extends GetxController {
       0,
     );
 
+    playerVolume.value = LocalStorageService.instance.getValue(
+      LocalStorageService.kPlayerVolume,
+      100.0,
+    );
     pipHideDanmu.value = LocalStorageService.instance
         .getValue(LocalStorageService.kPIPHideDanmu, true);
 
@@ -91,6 +106,37 @@ class AppSettingsController extends GetxController {
 
     bilibiliLoginTip.value = LocalStorageService.instance
         .getValue(LocalStorageService.kBilibiliLoginTip, true);
+
+    playerBufferSize.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kPlayerBufferSize, 32);
+
+    logEnable.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kLogEnable, false);
+    if (logEnable.value) {
+      Log.initWriter();
+    }
+
+    customPlayerOutput.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kCustomPlayerOutput, false);
+
+    videoOutputDriver.value = LocalStorageService.instance.getValue(
+      LocalStorageService.kVideoOutputDriver,
+      Platform.isAndroid ? "gpu" : "libmpv",
+    );
+
+    videoHardwareDecoder.value = LocalStorageService.instance.getValue(
+      LocalStorageService.kVideoHardwareDecoder,
+      Platform.isAndroid ? "auto-safe" : "auto",
+    );
+
+    autoUpdateFollowEnable.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kAutoUpdateFollowEnable, true);
+
+    autoUpdateFollowDuration.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kUpdateFollowDuration, 10);
+
+    updateFollowThreadCount.value = LocalStorageService.instance
+        .getValue(LocalStorageService.kUpdateFollowThreadCount, 4);
 
     initSiteSort();
     initHomeSort();
@@ -249,6 +295,13 @@ class AppSettingsController extends GetxController {
         .setValue(LocalStorageService.kDanmuStrokeWidth, e);
   }
 
+  var danmuFontWeight = FontWeight.normal.index.obs;
+  void setDanmuFontWeight(int e) {
+    danmuFontWeight.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kDanmuFontWeight, e);
+  }
+
   var qualityLevel = 1.obs;
   void setQualityLevel(int level) {
     qualityLevel.value = level;
@@ -277,11 +330,25 @@ class AppSettingsController extends GetxController {
         .setValue(LocalStorageService.kAutoExitDuration, e);
   }
 
+  var roomAutoExitDuration = 60.obs;
+  void setRoomAutoExitDuration(int e) {
+    roomAutoExitDuration.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kRoomAutoExitDuration, e);
+  }
+
   var playerCompatMode = false.obs;
   void setPlayerCompatMode(bool e) {
     playerCompatMode.value = e;
     LocalStorageService.instance
         .setValue(LocalStorageService.kPlayerCompatMode, e);
+  }
+
+  var playerBufferSize = 32.obs;
+  void setPlayerBufferSize(int e) {
+    playerBufferSize.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kPlayerBufferSize, e);
   }
 
   var playerAutoPause = false.obs;
@@ -309,6 +376,11 @@ class AppSettingsController extends GetxController {
     LocalStorageService.instance.shieldBox.delete(e);
   }
 
+  Future clearShieldList() async {
+    shieldList.clear();
+    await LocalStorageService.instance.shieldBox.clear();
+  }
+
   void setScaleMode(int value) {
     scaleMode.value = value;
     LocalStorageService.instance.setValue(
@@ -332,6 +404,15 @@ class AppSettingsController extends GetxController {
     LocalStorageService.instance.setValue(
       LocalStorageService.kHomeSort,
       homeSort.join(","),
+    );
+  }
+
+  Rx<double> playerVolume = 100.0.obs;
+  void setPlayerVolume(double value) {
+    playerVolume.value = value;
+    LocalStorageService.instance.setValue(
+      LocalStorageService.kPlayerVolume,
+      value,
     );
   }
 
@@ -372,5 +453,60 @@ class AppSettingsController extends GetxController {
     bilibiliLoginTip.value = e;
     LocalStorageService.instance
         .setValue(LocalStorageService.kBilibiliLoginTip, e);
+  }
+
+  var logEnable = false.obs;
+  void setLogEnable(bool e) {
+    logEnable.value = e;
+    LocalStorageService.instance.setValue(LocalStorageService.kLogEnable, e);
+  }
+
+  var customPlayerOutput = false.obs;
+  void setCustomPlayerOutput(bool e) {
+    customPlayerOutput.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kCustomPlayerOutput, e);
+  }
+
+  var videoOutputDriver = "".obs;
+  void setVideoOutputDriver(String e) {
+    videoOutputDriver.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kVideoOutputDriver, e);
+  }
+
+  var videoHardwareDecoder = "".obs;
+  void setVideoHardwareDecoder(String e) {
+    videoHardwareDecoder.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kVideoHardwareDecoder, e);
+  }
+
+  var autoUpdateFollowEnable = false.obs;
+  void setAutoUpdateFollowEnable(bool e) {
+    autoUpdateFollowEnable.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kAutoUpdateFollowEnable, e);
+  }
+
+  var autoUpdateFollowDuration = 10.obs;
+  void setAutoUpdateFollowDuration(int e) {
+    autoUpdateFollowDuration.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kUpdateFollowDuration, e);
+  }
+
+  var updateFollowThreadCount = 4.obs;
+  void setUpdateFollowThreadCount(int e) {
+    updateFollowThreadCount.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kUpdateFollowThreadCount, e);
+  }
+
+  var playerForceHttps = false.obs;
+  void setPlayerForceHttps(bool e) {
+    playerForceHttps.value = e;
+    LocalStorageService.instance
+        .setValue(LocalStorageService.kPlayerForceHttps, e);
   }
 }

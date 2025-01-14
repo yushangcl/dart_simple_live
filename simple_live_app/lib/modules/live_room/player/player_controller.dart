@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
-
 import 'package:auto_orientation/auto_orientation.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:floating/floating.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,9 +16,11 @@ import 'package:perfect_volume_control/perfect_volume_control.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:simple_live_app/app/controller/app_settings_controller.dart';
 import 'package:simple_live_app/app/controller/base_controller.dart';
+import 'package:simple_live_app/app/custom_throttle.dart';
 import 'package:simple_live_app/app/log.dart';
 import 'package:simple_live_app/app/utils.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:window_manager/window_manager.dart';
 
 mixin PlayerMixin {
   GlobalKey<VideoState> globalPlayerKey = GlobalKey<VideoState>();
@@ -26,26 +28,44 @@ mixin PlayerMixin {
 
   /// 播放器实例
   late final player = Player(
-    configuration: const PlayerConfiguration(
+    configuration: PlayerConfiguration(
       title: "Simple Live Player",
+      logLevel: AppSettingsController.instance.logEnable.value
+          ? MPVLogLevel.info
+          : MPVLogLevel.error,
+      // bufferSize:
+      //     // media-kit #549
+      //     AppSettingsController.instance.playerBufferSize.value * 1024 * 1024,
     ),
   );
 
   /// 视频控制器
   late final videoController = VideoController(
     player,
-    configuration: AppSettingsController.instance.playerCompatMode.value
-        ? const VideoControllerConfiguration(
-            vo: 'mediacodec_embed',
-            hwdec: 'mediacodec',
+    configuration: AppSettingsController.instance.customPlayerOutput.value
+        ? VideoControllerConfiguration(
+            vo: AppSettingsController.instance.videoOutputDriver.value,
+            hwdec: AppSettingsController.instance.videoHardwareDecoder.value,
           )
-        : VideoControllerConfiguration(
-            enableHardwareAcceleration:
-                AppSettingsController.instance.hardwareDecode.value,
-          ),
+        : AppSettingsController.instance.playerCompatMode.value
+            ? const VideoControllerConfiguration(
+                vo: 'mediacodec_embed',
+                hwdec: 'mediacodec',
+              )
+            : VideoControllerConfiguration(
+                enableHardwareAcceleration:
+                    AppSettingsController.instance.hardwareDecode.value,
+                androidAttachSurfaceAfterVideoParameters: false,
+              ),
   );
 }
 mixin PlayerStateMixin on PlayerMixin {
+  ///音量控制条计时器
+  Timer? hidevolumeTimer;
+
+  /// 是否进入桌面端小窗
+  RxBool smallWindowState = false.obs;
+
   /// 是否显示弹幕
   RxBool showDanmakuState = false.obs;
 
@@ -163,6 +183,8 @@ mixin PlayerDanmakuMixin on PlayerStateMixin {
         duration: AppSettingsController.instance.danmuSpeed.value,
         opacity: AppSettingsController.instance.danmuOpacity.value,
         strokeWidth: AppSettingsController.instance.danmuStrokeWidth.value,
+        fontWeight: FontWeight
+            .values[AppSettingsController.instance.danmuFontWeight.value],
       ),
     );
   }
@@ -192,10 +214,12 @@ mixin PlayerSystemMixin on PlayerMixin, PlayerStateMixin, PlayerDanmakuMixin {
 
   /// 初始化一些系统状态
   void initSystem() async {
-    PerfectVolumeControl.hideUI = true;
+    if (Platform.isAndroid || Platform.isIOS) {
+      PerfectVolumeControl.hideUI = true;
+    }
 
     // 屏幕常亮
-    WakelockPlus.enable();
+    //WakelockPlus.enable();
 
     // 开始隐藏计时
     resetHideControlsTimer();
@@ -216,29 +240,90 @@ mixin PlayerSystemMixin on PlayerMixin, PlayerStateMixin, PlayerDanmakuMixin {
     );
 
     await setPortraitOrientation();
-    await screenBrightness.resetScreenBrightness();
+    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+      // 亮度重置,桌面平台可能会报错,暂时不处理桌面平台的亮度
+      try {
+        await screenBrightness.resetScreenBrightness();
+      } catch (e) {
+        Log.logPrint(e);
+      }
+    }
+
     await WakelockPlus.disable();
   }
 
   /// 进入全屏
   void enterFullScreen() {
     fullScreenState.value = true;
-    //全屏
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
-    if (!isVertical.value) {
-      //横屏
-      setLandscapeOrientation();
+    if (Platform.isAndroid || Platform.isIOS) {
+      //全屏
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
+      if (!isVertical.value) {
+        //横屏
+        setLandscapeOrientation();
+      }
+    } else {
+      windowManager.setFullScreen(true);
     }
     //danmakuController?.clear();
   }
 
   /// 退出全屏
   void exitFull() {
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge,
-        overlays: SystemUiOverlay.values);
-    setPortraitOrientation();
+    if (Platform.isAndroid || Platform.isIOS) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge,
+          overlays: SystemUiOverlay.values);
+      setPortraitOrientation();
+    } else {
+      windowManager.setFullScreen(false);
+    }
     fullScreenState.value = false;
+
     //danmakuController?.clear();
+  }
+
+  Size? _lastWindowSize;
+  Offset? _lastWindowPosition;
+
+  ///小窗模式()
+  void enterSmallWindow() async {
+    if (!(Platform.isAndroid || Platform.isIOS)) {
+      fullScreenState.value = true;
+      smallWindowState.value = true;
+
+      // 读取窗口大小
+      _lastWindowSize = await windowManager.getSize();
+      _lastWindowPosition = await windowManager.getPosition();
+
+      windowManager.setTitleBarStyle(TitleBarStyle.hidden);
+      // 获取视频窗口大小
+      var width = player.state.width ?? 16;
+      var height = player.state.height ?? 9;
+
+      // 横屏还是竖屏
+      if (height > width) {
+        var aspectRatio = width / height;
+        windowManager.setSize(Size(400, 400 / aspectRatio));
+      } else {
+        var aspectRatio = height / width;
+        windowManager.setSize(Size(280 / aspectRatio, 280));
+      }
+
+      windowManager.setAlwaysOnTop(true);
+    }
+  }
+
+  ///退出小窗模式()
+  void exitSmallWindow() {
+    if (!(Platform.isAndroid || Platform.isIOS)) {
+      fullScreenState.value = false;
+      smallWindowState.value = false;
+      windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      windowManager.setSize(_lastWindowSize!);
+      windowManager.setPosition(_lastWindowPosition!);
+      windowManager.setAlwaysOnTop(false);
+      //windowManager.setAlignment(Alignment.center);
+    }
   }
 
   /// 设置横屏
@@ -277,7 +362,7 @@ mixin PlayerSystemMixin on PlayerMixin, PlayerStateMixin, PlayerDanmakuMixin {
   Future saveScreenshot() async {
     try {
       SmartDialog.showLoading(msg: "正在保存截图");
-      //检查相册权限
+      //检查相册权限,仅iOS需要
       var permission = await Utils.checkPhotoPermission();
       if (!permission) {
         SmartDialog.showToast("没有相册权限");
@@ -291,10 +376,28 @@ mixin PlayerSystemMixin on PlayerMixin, PlayerStateMixin, PlayerDanmakuMixin {
         SmartDialog.dismiss(status: SmartStatus.loading);
         return;
       }
-      await ImageGallerySaver.saveImage(
-        imageData,
-      );
-      SmartDialog.showToast("已保存截图至相册");
+
+      if (Platform.isIOS || Platform.isAndroid) {
+        await ImageGallerySaver.saveImage(
+          imageData,
+        );
+        SmartDialog.showToast("已保存截图至相册");
+      } else {
+        //选择保存文件夹
+        var path = await FilePicker.platform.saveFile(
+          allowedExtensions: ["jpg"],
+          type: FileType.image,
+          fileName: "${DateTime.now().millisecondsSinceEpoch}.jpg",
+        );
+        if (path == null) {
+          SmartDialog.showToast("取消保存");
+          SmartDialog.dismiss(status: SmartStatus.loading);
+          return;
+        }
+        var file = File(path);
+        await file.writeAsBytes(imageData);
+        SmartDialog.showToast("已保存截图至${file.path}");
+      }
     } catch (e) {
       Log.logPrint(e);
       SmartDialog.showToast("截图失败");
@@ -357,6 +460,30 @@ mixin PlayerGestureControlMixin
     }
   }
 
+  //桌面端操控
+  void onEnter(PointerEnterEvent event) {
+    if (!showControlsState.value) {
+      showControls();
+    }
+  }
+
+  void onExit(PointerExitEvent event) {
+    if (showControlsState.value) {
+      hideControls();
+    }
+  }
+
+  void onHover(PointerHoverEvent event, BuildContext context) {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final targetPosition = screenHeight * 0.25; // 计算屏幕顶部25%的位置
+    if (event.position.dy <= targetPosition ||
+        event.position.dy >= targetPosition * 3) {
+      if (!showControlsState.value) {
+        showControls();
+      }
+    }
+  }
+
   /// 双击全屏/退出全屏
   void onDoubleTap(TapDownDetails details) {
     if (lockControlsState.value) {
@@ -375,6 +502,8 @@ mixin PlayerGestureControlMixin
   var _currentBrightness = 1.0;
   var verStartPosition = 0.0;
 
+  DelayedThrottle? throttle;
+
   /// 竖向手势开始
   void onVerticalDragStart(DragStartDetails details) async {
     if (lockControlsState.value && fullScreenState.value) {
@@ -390,10 +519,16 @@ mixin PlayerGestureControlMixin
     verStartPosition = dy;
     leftVerticalDrag = details.globalPosition.dx < Get.width / 2;
 
+    throttle = DelayedThrottle(200);
+
     verticalDragging = true;
     showGestureTip.value = true;
-    _currentVolume = await PerfectVolumeControl.volume;
-    _currentBrightness = await screenBrightness.current;
+    if (Platform.isAndroid || Platform.isIOS) {
+      _currentVolume = await PerfectVolumeControl.volume;
+    }
+    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+      _currentBrightness = await screenBrightness.current;
+    }
   }
 
   /// 竖向手势更新
@@ -402,7 +537,9 @@ mixin PlayerGestureControlMixin
       return;
     }
     if (verticalDragging == false) return;
-
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return;
+    }
     //String text = "";
     //double value = 0.0;
 
@@ -415,30 +552,43 @@ mixin PlayerGestureControlMixin
     }
   }
 
+  int lastVolume = -1; // it's ok to be -1
+
   void setGestureVolume(double dy) {
     double value = 0.0;
+    double seek;
     if (dy > verStartPosition) {
       value = ((dy - verStartPosition) / (Get.height * 0.5));
 
-      var seek = _currentVolume - value;
+      seek = _currentVolume - value;
       if (seek < 0) {
         seek = 0;
       }
-      PerfectVolumeControl.setVolume(seek);
-      gestureTipText.value = "音量 ${(seek * 100).toInt()}%";
-      Log.logPrint(value);
     } else {
       value = ((dy - verStartPosition) / (Get.height * 0.5));
-      var seek = value.abs() + _currentVolume;
+      seek = value.abs() + _currentVolume;
       if (seek > 1) {
         seek = 1;
       }
-
-      PerfectVolumeControl.setVolume(seek);
-
-      gestureTipText.value = "音量 ${(seek * 100).toInt()}%";
-      Log.logPrint(value);
     }
+    int volume = _convertVolume((seek * 100).round());
+    if (volume == lastVolume) {
+      return;
+    }
+    lastVolume = volume;
+    // update UI outside throttle to make it more fluent
+    gestureTipText.value = "音量 $volume%";
+    throttle?.invoke(() async => await _realSetVolume(volume));
+  }
+
+  // 0 to 100, 5 step each
+  int _convertVolume(int volume) {
+    return (volume / 5).round() * 5;
+  }
+
+  Future<void> _realSetVolume(int volume) async {
+    Log.logPrint(volume);
+    return await PerfectVolumeControl.setVolume(volume / 100);
   }
 
   void setGestureBrightness(double dy) {
@@ -472,6 +622,7 @@ mixin PlayerGestureControlMixin
     if (lockControlsState.value && fullScreenState.value) {
       return;
     }
+    throttle = null;
     verticalDragging = false;
     leftVerticalDrag = false;
     showGestureTip.value = false;
@@ -489,6 +640,8 @@ class PlayerController extends BaseController
   void onInit() {
     initSystem();
     initStream();
+    //设置音量
+    player.setVolume(AppSettingsController.instance.playerVolume.value);
     super.onInit();
   }
 
@@ -497,12 +650,25 @@ class PlayerController extends BaseController
   StreamSubscription? _widthSubscription;
   StreamSubscription? _heightSubscription;
   StreamSubscription? _logSubscription;
+  StreamSubscription? _playingSubscription;
 
   void initStream() {
     _errorSubscription = player.stream.error.listen((event) {
       Log.d("播放器错误：$event");
+      // 跳过无音频输出的错误
+      // Could not open/initialize audio device -> no sound.
+      if (event.contains('no sound.')) {
+        return;
+      }
       //SmartDialog.showToast(event);
       mediaError(event);
+    });
+
+    _playingSubscription = player.stream.playing.listen((event) {
+      if (event) {
+        WakelockPlus.enable();
+        Log.d("Playing");
+      }
     });
 
     _completedSubscription = player.stream.completed.listen((event) {
@@ -514,13 +680,13 @@ class PlayerController extends BaseController
       Log.d("播放器日志：$event");
     });
     _widthSubscription = player.stream.width.listen((event) {
-      Log.w(
+      Log.d(
           'width:$event  W:${(player.state.width)}  H:${(player.state.height)}');
       isVertical.value =
           (player.state.height ?? 9) > (player.state.width ?? 16);
     });
     _heightSubscription = player.stream.height.listen((event) {
-      Log.w(
+      Log.d(
           'height:$event  W:${(player.state.width)}  H:${(player.state.height)}');
       isVertical.value =
           (player.state.height ?? 9) > (player.state.width ?? 16);
@@ -534,31 +700,22 @@ class PlayerController extends BaseController
     _heightSubscription?.cancel();
     _logSubscription?.cancel();
     _pipSubscription?.cancel();
+    _playingSubscription?.cancel();
   }
 
-  void mediaEnd() {}
+  void mediaEnd() {
+    WakelockPlus.disable();
+  }
 
-  void mediaError(String error) {}
+  void mediaError(String error) {
+    WakelockPlus.disable();
+  }
 
   void showDebugInfo() {
-    if (lockControlsState.value && fullScreenState.value) {
-      return;
-    }
     Utils.showBottomSheet(
       title: "播放信息",
       child: ListView(
         children: [
-          ListTile(
-            title: const Text("Media"),
-            subtitle: Text(player.state.playlist.toString()),
-            onTap: () {
-              Clipboard.setData(
-                ClipboardData(
-                  text: "Media\n${player.state.playlist}",
-                ),
-              );
-            },
-          ),
           ListTile(
             title: const Text("Resolution"),
             subtitle: Text('${player.state.width}x${player.state.height}'),
@@ -589,6 +746,17 @@ class PlayerController extends BaseController
               Clipboard.setData(
                 ClipboardData(
                   text: "AudioParams\n${player.state.audioParams}",
+                ),
+              );
+            },
+          ),
+          ListTile(
+            title: const Text("Media"),
+            subtitle: Text(player.state.playlist.toString()),
+            onTap: () {
+              Clipboard.setData(
+                ClipboardData(
+                  text: "Media\n${player.state.playlist}",
                 ),
               );
             },
@@ -626,6 +794,17 @@ class PlayerController extends BaseController
               );
             },
           ),
+          ListTile(
+            title: const Text("Volume"),
+            subtitle: Text(player.state.volume.toString()),
+            onTap: () {
+              Clipboard.setData(
+                ClipboardData(
+                  text: "Volume\n${player.state.volume}",
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
@@ -634,6 +813,9 @@ class PlayerController extends BaseController
   @override
   void onClose() async {
     Log.w("播放器关闭");
+    if (smallWindowState.value) {
+      exitSmallWindow();
+    }
     disposeStream();
     disposeDanmakuController();
     await resetSystem();
